@@ -20,6 +20,7 @@ from PyQt5.QtGui import QFont
 
 from src.gui.file_panel import FilePanel
 from src.gui.header_view import HeaderViewWidget
+from src.gui.db_panel import DbPanelWidget
 from src.gui.query_builder import QueryBuilderWidget
 from src.gui.sql_editor import SqlEditorWidget
 from src.gui.result_table import ResultTableWidget
@@ -37,6 +38,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._data_manager = DataManager()
         self._current_filepath = None
+        self._current_df = None  # 当前活跃的 DataFrame（可能来自文件或数据库）
 
         self._init_ui()
         self._connect_signals()
@@ -62,8 +64,11 @@ class MainWindow(QMainWindow):
         left_splitter = QSplitter(Qt.Vertical)
         left_splitter.addWidget(self._file_panel)
         left_splitter.addWidget(self._header_view)
-        left_splitter.setStretchFactor(0, 1)
+        self._db_panel = DbPanelWidget()
+        left_splitter.addWidget(self._db_panel)
+        left_splitter.setStretchFactor(0, 2)
         left_splitter.setStretchFactor(1, 1)
+        left_splitter.setStretchFactor(2, 1)
 
         self._main_splitter.addWidget(left_splitter)
 
@@ -185,6 +190,7 @@ class MainWindow(QMainWindow):
         self._file_panel.sheet_changed.connect(self._on_sheet_changed)
         self._sql_editor.query_executed.connect(self._execute_sql)
         self._query_builder.query_requested.connect(self._on_query_from_builder)
+        self._db_panel.dataset_loaded.connect(self._on_dataset_loaded)
 
     # ── 事件处理 ────────────────────────────────
 
@@ -217,11 +223,24 @@ class MainWindow(QMainWindow):
 
             from src.core.query_engine import QueryEngine
             qe = QueryEngine()
-            schema = qe.get_schema_info(self._data_manager.get_dataframe())
+            schema = qe.get_schema_info_with_db(
+                self._data_manager.get_dataframe(),
+                self._db_panel.get_store()
+            )
             self._sql_editor.set_schema_hint(schema)
 
             preview = self._data_manager.get_preview(50)
             self._result_table.set_data(preview)
+
+            # 记录当前活跃的 DataFrame
+            self._current_df = self._data_manager.get_dataframe()
+
+            # 设置当前数据供数据库面板保存
+            self._db_panel.set_current_data(
+                self._current_df,
+                source_file=os.path.basename(filepath),
+                sheet_name=self._data_manager._current_sheet
+            )
 
             summary = self._data_manager.get_summary()
             self._status_bar.showMessage(
@@ -250,17 +269,29 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "切换失败", str(e))
 
     def _on_data_updated(self):
+        # 更新当前 DataFrame
+        self._current_df = self._data_manager.get_dataframe()
+
         self._header_view.set_header_info(self._data_manager.get_header_info())
         self._file_panel.set_columns(self._data_manager.get_columns())
         self._query_builder.set_available_columns(self._data_manager.get_columns())
 
         from src.core.query_engine import QueryEngine
         qe = QueryEngine()
-        schema = qe.get_schema_info(self._data_manager.get_dataframe())
+        schema = qe.get_schema_info_with_db(
+            self._current_df, self._db_panel.get_store()
+        )
         self._sql_editor.set_schema_hint(schema)
 
         preview = self._data_manager.get_preview(50)
         self._result_table.set_data(preview)
+
+        # 更新数据库面板
+        self._db_panel.set_current_data(
+            self._current_df,
+            source_file=os.path.basename(self._current_filepath) if self._current_filepath else "",
+            sheet_name=self._data_manager._current_sheet if self._data_manager._current_sheet else ""
+        )
 
     def _on_run_query(self):
         current_tab = self._query_tabs.currentIndex()
@@ -276,10 +307,16 @@ class MainWindow(QMainWindow):
     def _execute_sql(self, sql):
         try:
             from src.core.query_engine import QueryEngine
-            df = self._data_manager.get_dataframe()
+            import pandas as pd
+            # 如果没加载过文件，用空 DataFrame 作为 data 表（允许仅查询持久化表）
+            if self._current_df is None:
+                df = pd.DataFrame()
+            else:
+                df = self._current_df
             engine = QueryEngine()
+            db_store = self._db_panel.get_store()
 
-            valid, err = engine.validate(df, sql)
+            valid, err = engine.validate(df, sql, db_store)
             if not valid:
                 reply = QMessageBox.question(
                     self, "SQL 验证失败",
@@ -289,7 +326,7 @@ class MainWindow(QMainWindow):
                 if reply != QMessageBox.Yes:
                     return
 
-            result = engine.execute(df, sql)
+            result = engine.execute(df, sql, db_store)
             self._show_result(result, "SQL 查询结果 ({} 行)".format(len(result)))
 
         except Exception as e:
@@ -299,8 +336,27 @@ class MainWindow(QMainWindow):
         self._sql_editor.set_sql(sql)
         self._execute_sql(sql)
 
+    def _on_dataset_loaded(self, df, name):
+        """从数据库加载数据集。"""
+        self._current_df = df  # 设为当前活跃 DataFrame
+        self._result_table.set_data(df, "数据集: {} ({} 行)".format(name, len(df)))
+
+        from src.core.query_engine import QueryEngine
+        qe = QueryEngine()
+        schema = qe.get_schema_info_with_db(df, self._db_panel.get_store())
+        self._sql_editor.set_schema_hint(schema)
+        self._query_builder.set_available_columns(list(df.columns))
+
+        self._db_panel.set_current_data(df, source_file=name, sheet_name="数据库")
+
+        self._status_bar.showMessage(
+            "已加载数据集: {} | {} 行 x {} 列".format(name, len(df), len(df.columns))
+        )
+
     def _show_result(self, df, title=""):
+        self._current_df = df  # 查询结果也可作为后续查询的基础
         self._result_table.set_data(df, title)
+        self._db_panel.set_current_data(df, source_file="查询结果", sheet_name="")
         self._status_bar.showMessage(
             "查询完成 | 结果: {} 行 x {} 列".format(len(df), len(df.columns))
         )

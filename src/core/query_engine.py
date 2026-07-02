@@ -34,44 +34,49 @@ class QueryEngine:
         self._last_result: Optional[pd.DataFrame] = None
         self._last_sql: str = ""
 
-    def execute(self, df: pd.DataFrame, sql: str) -> pd.DataFrame:
+    def execute(self, df: pd.DataFrame, sql: str,
+                db_store=None) -> pd.DataFrame:
         """
         执行 SQL 查询。
 
         参数:
             df: 源 DataFrame
-            sql: SQL 查询语句。表名使用 'data'。
-
-        返回:
-            查询结果 DataFrame
+            sql: SQL 查询语句。表名使用 'data' 或数据库中的表名。
+            db_store: 可选 DatabaseStore，传入后可查询持久化表。
         """
-        # 预处理：修复常见错误（双引号字符串等）+ 统一表名为 'data'
-        sql = self._preprocess_sql(sql, df)
+        sql = self._preprocess_sql(sql, df, db_store)
 
         try:
-            con = duckdb.connect()
-            con.register(self.DEFAULT_TABLE, df)
+            if db_store is not None:
+                con = duckdb.connect(db_store.db_path)
+            else:
+                con = duckdb.connect()
+
+            # 仅当 DataFrame 有列时才注册 data 表
+            if len(df.columns) > 0:
+                con.register(self.DEFAULT_TABLE, df)
+
             result = con.execute(sql).fetchdf()
             con.close()
         except Exception as e:
-            raise ValueError(f"SQL 执行失败:\n{sql}\n\n错误: {e}") from e
+            raise ValueError("SQL 执行失败:\n{}\n\n错误: {}".format(sql, e)) from e
 
         self._last_result = result
         self._last_sql = sql
         return result
 
-    def validate(self, df: pd.DataFrame, sql: str) -> Tuple[bool, str]:
-        """
-        验证 SQL 语句是否合法。
-
-        返回: (是否合法, 错误信息)
-        """
+    def validate(self, df: pd.DataFrame, sql: str,
+                 db_store=None) -> Tuple[bool, str]:
+        """验证 SQL 语句是否合法。"""
         try:
-            sql = self._preprocess_sql(sql, df)
-            # 注册 DataFrame 后用 EXPLAIN 验证
-            con = duckdb.connect()
-            con.register(self.DEFAULT_TABLE, df)
-            con.execute(f"EXPLAIN {sql}")
+            sql = self._preprocess_sql(sql, df, db_store)
+            if db_store is not None:
+                con = duckdb.connect(db_store.db_path)
+            else:
+                con = duckdb.connect()
+            if len(df.columns) > 0:
+                con.register(self.DEFAULT_TABLE, df)
+            con.execute("EXPLAIN {}".format(sql))
             con.close()
             return True, ""
         except Exception as e:
@@ -119,6 +124,47 @@ class QueryEngine:
 
         return "\n".join(lines)
 
+    def get_schema_info_with_db(self, df: pd.DataFrame, db_store=None) -> str:
+        """
+        生成包含持久化表的完整 Schema 信息。
+        """
+        lines = []
+
+        # 当前内存表
+        lines.append("-- ========================")
+        lines.append("-- 当前表: data ({} 行)".format(len(df)))
+        lines.append("-- ========================")
+        type_map = {
+            "object": "VARCHAR", "int64": "BIGINT", "float64": "DOUBLE",
+            "bool": "BOOLEAN", "datetime64[ns]": "TIMESTAMP",
+        }
+        for col in df.columns:
+            dtype = str(df[col].dtype)
+            sql_type = type_map.get(dtype, "VARCHAR")
+            lines.append('--   "{}"  {}'.format(col, sql_type))
+
+        # 持久化表
+        if db_store is not None:
+            datasets = db_store.list_datasets()
+            if datasets:
+                lines.append("--")
+                lines.append("-- ========================")
+                lines.append("-- 持久化表 (可直接查询):")
+                lines.append("-- ========================")
+                for ds in datasets:
+                    lines.append('--   {}  ({} 行 x {} 列)'.format(
+                        ds["name"], ds["rows"], ds["cols"]
+                    ))
+                lines.append("--")
+                lines.append("-- 示例: SELECT * FROM {} WHERE ...".format(
+                    datasets[0]["name"] if datasets else "table_name"
+                ))
+                lines.append("-- JOIN 示例: SELECT * FROM data JOIN {} ON ...".format(
+                    datasets[0]["name"] if datasets else "table_name"
+                ))
+
+        return "\n".join(lines)
+
     def get_last_result(self) -> Optional[pd.DataFrame]:
         """获取上次查询结果。"""
         return self._last_result
@@ -129,26 +175,30 @@ class QueryEngine:
 
     # ── 内部方法 ────────────────────────────────
 
-    def _preprocess_sql(self, sql: str, df: pd.DataFrame) -> str:
+    def _preprocess_sql(self, sql: str, df: pd.DataFrame,
+                        db_store=None) -> str:
         """
         预处理 SQL，修复常见的用户书写错误:
         1. 双引号字符串值 → 单引号（"广州分公司" → '广州分公司'）
            双引号在 SQL 中表示标识符(列名)，字符串值必须用单引号
-        2. 中文标点符号修复（可选）
         """
+        # 收集所有已知列名：当前DataFrame + 数据库中的表
         column_names = set(df.columns)
+        table_names = set()
+
+        if db_store is not None:
+            for ds in db_store.list_datasets():
+                table_names.add(ds["name"])
+                table_names.add(ds["table_name"])
 
         def replace_double_quoted_string(match):
-            """将双引号内容根据上下文判断是标识符还是字符串。"""
             content = match.group(1)
-            # 如果内容匹配某个列名 → 保留双引号（是标识符引用）
-            if content in column_names:
-                return f'"{content}"'
-            # 否则认为是字符串字面量 → 换成单引号
-            return f"'{content}'"
+            # 列名或表名 → 保留双引号
+            if content in column_names or content in table_names:
+                return '"{}"'.format(content)
+            # 否则是字符串字面量 → 单引号
+            return "'{}'".format(content)
 
-        # 匹配不在列名上下文中的 "xxx" 模式
-        # 策略：将所有 "内容" 检查一遍，非列名则替换为单引号
         sql = re.sub(r'"([^"]*)"', replace_double_quoted_string, sql)
 
         return sql
