@@ -30,10 +30,16 @@ class DatabaseStore:
 
     def __init__(self, db_path: str = None):
         if db_path is None:
-            db_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "..", "..",
-                "xlsx_tools_data.db"
-            )
+            import sys
+            if getattr(sys, 'frozen', False):
+                # onefile 模式：数据库放在 exe 同目录
+                exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+                db_path = os.path.join(exe_dir, "xlsx_tools_data.db")
+            else:
+                db_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "..", "..",
+                    "xlsx_tools_data.db"
+                )
         self.db_path = os.path.abspath(db_path)
         self._conn: Optional[duckdb.DuckDBPyConnection] = None
         self._init_db()

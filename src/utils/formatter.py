@@ -2,7 +2,7 @@
 
 import re
 from datetime import datetime, date
-from typing import Any
+from typing import Any, List
 
 
 def sanitize_column_name(name: Any) -> str:
@@ -22,7 +22,7 @@ def sanitize_column_name(name: Any) -> str:
     return s
 
 
-def flatten_header(hierarchy_parts: list[str], separator: str = "_") -> str:
+def flatten_header(hierarchy_parts: List[str], separator: str = "_") -> str:
     """
     将层级表头扁平化为单个列名。
 
@@ -36,7 +36,7 @@ def flatten_header(hierarchy_parts: list[str], separator: str = "_") -> str:
     return separator.join(parts)
 
 
-def infer_column_type(values: list) -> str:
+def infer_column_type(values: List) -> str:
     """
     推断列的数据类型。返回: 'numeric', 'datetime', 'string', 'boolean', 'mixed'
     """

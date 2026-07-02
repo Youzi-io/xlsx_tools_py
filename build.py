@@ -50,9 +50,46 @@ def clean():
 
 def ensure_deps():
     """确保依赖已安装。"""
+    env = os.environ.copy()
+    # 清除代理环境变量 + 显式禁用代理（修复 Python 3.8 pip SSL bug）
+    for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+              "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"]:
+        env.pop(k, None)
+
+    pip_base = [sys.executable, "-m", "pip",
+                "--proxy", "",           # 显式禁用代理
+                "--trusted-host", "pypi.org",
+                "--trusted-host", "files.pythonhosted.org"]
+
+    # 第一步：通过 ensurepip 强制重装 pip
+    print("重装 pip ...")
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
+            timeout=60, env=env
+        )
+    except Exception:
+        pass
+
+    # 第二步：升级到最新 pip
+    print("升级 pip ...")
+    try:
+        subprocess.check_call(
+            pip_base + ["install", "--upgrade", "pip"],
+            timeout=120, env=env
+        )
+    except Exception:
+        pass
+
+    # 第三步：安装依赖
     req = os.path.join(ROOT, "requirements.txt")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req])
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
+    print("安装依赖 ...")
+    subprocess.check_call(
+        pip_base + ["install", "-r", req], timeout=300, env=env
+    )
+    subprocess.check_call(
+        pip_base + ["install", "pyinstaller"], timeout=120, env=env
+    )
     print("依赖就绪")
 
 

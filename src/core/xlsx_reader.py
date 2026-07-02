@@ -186,7 +186,7 @@ class XlsxReader:
         ws = self.get_active_sheet()
         return [str(r) for r in ws.merged_cells.ranges]
 
-    def get_merged_ranges_raw(self) -> list:
+    def get_merged_ranges_raw(self) -> List:
         """获取当前 Sheet 的所有合并区域（openpyxl 对象）。"""
         ws = self.get_active_sheet()
         return list(ws.merged_cells.ranges)

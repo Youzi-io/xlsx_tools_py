@@ -1,3 +1,5 @@
 dist/
 build/
 .pytest_cache/
+_wheels/
+tests/
